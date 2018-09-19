@@ -19,7 +19,7 @@ limitations under the License.
 package e2e
 
 import (
-	"fmt"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
@@ -27,6 +27,7 @@ import (
 	pkgTest "github.com/knative/pkg/test"
 	"github.com/knative/pkg/test/logging"
 	"github.com/knative/serving/test"
+	"golang.org/x/sync/errgroup"
 	"k8s.io/api/core/v1"
 	"k8s.io/api/extensions/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -54,11 +55,11 @@ func isDeploymentScaledToZero() func(d *v1beta1.Deployment) (bool, error) {
 }
 
 func generateTrafficBurst(clients *test.Clients, logger *logging.BaseLogger, want int, domain string) error {
-	concurrentRequests := make(chan bool, want)
+	var g errgroup.Group
 
 	logger.Infof("Performing %d concurrent requests.", want)
 	for i := 0; i < want; i++ {
-		go func() {
+		g.Go(func() error {
 			res, err := pkgTest.WaitForEndpointState(clients.KubeClient,
 				logger,
 				domain,
@@ -70,22 +71,18 @@ func generateTrafficBurst(clients *test.Clients, logger *logging.BaseLogger, wan
 				if res != nil {
 					logger.Errorf("Response headers: %v", res.Header)
 				} else {
-					logger.Errorf("Nil response. No response headers to show.")
+					logger.Error("Nil response. No response headers to show.")
 				}
+				return err
 			}
-			concurrentRequests <- err == nil
-		}()
+
+			return nil
+		})
 	}
 
-	logger.Infof("Waiting for all requests to complete.")
-	got := 0
-	for i := 0; i < want; i++ {
-		if <-concurrentRequests {
-			got++
-		}
-	}
-	if got != want {
-		return fmt.Errorf("Error making requests for scale up. Got %v successful requests. Wanted %v.", got, want)
+	logger.Info("Waiting for requests to complete.")
+	if err := g.Wait(); err != nil {
+		return errors.New("Error making requests for scale up")
 	}
 	return nil
 }
